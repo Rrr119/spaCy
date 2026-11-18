@@ -988,6 +988,17 @@ class Errors(metaclass=ErrorsWithCodes):
     E1057 = ("The `TextCatReduce` architecture must be used with at least one "
              "reduction. Please enable one of `use_reduce_first`, "
              "`use_reduce_last`, `use_reduce_max` or `use_reduce_mean`.")
+    E1058 = ("The pipeline component '{component}' declares a dependency "
+             "{direction} '{name}', but no matching component or factory is "
+             "available. Available components: {opts}")
+    E1059 = ("Cycle detected in pipeline dependencies: {cycle}. Pipeline "
+             "dependencies must form a directed acyclic graph.")
+    E1060 = ("Invalid pipeline dependency name: {value}. Expected a non-empty "
+             "string or an iterable of non-empty strings.")
+    E1061 = ("Invalid 'dependencies' setting for a pipeline component: "
+             "{value}. Expected a dictionary with 'before' and/or 'after' keys.")
+    E1062 = ("Invalid key '{key}' in component 'dependencies'. Available keys: "
+             "{opts}.")
 
 
 # Deprecated model shortcuts, only used in errors and warnings

@@ -510,6 +510,62 @@ nlp.add_pipe("ner", source=source_nlp)
 print(nlp.pipe_names)
 ```
 
+### Declaring pipeline dependencies {id="dependencies"}
+
+Pipeline components can declare the components they need to run before or after
+using the `before` and `after` arguments of
+[`@Language.component`](/api/language#component) or
+[`@Language.factory`](/api/language#factory). spaCy topologically sorts the
+pipeline after components are added and after a config is loaded. This is
+useful for domain pipelines where, for example, terminology normalization must
+run before entity recognition, or a postprocessing step must run after the
+parser.
+
+> ```python
+> @Language.component("normalize_domain_terms", before=["ner"])
+> def normalize_domain_terms(doc):
+>     # Normalize terms before the entity recognizer sees the Doc
+>     return doc
+>
+> @Language.component("resolve_domain_entities", after=["ner", "parser"])
+> def resolve_domain_entities(doc):
+>     # Use entities and the dependency parse
+>     return doc
+> ```
+
+Dependencies can refer to a component instance name or a factory name. A
+factory reference applies to every other instance of that factory. spaCy keeps
+the existing pipeline order as a stable tie-breaker, so this feature doesn't
+change the order of components that don't declare dependencies. A dependency
+cycle raises an error.
+
+The same declarations can be stored in the component config. The existing
+`[nlp] pipeline` list remains the source of component names and their initial
+order, so configs without dependency settings continue to load exactly as
+before:
+
+> ```ini
+> [nlp]
+> lang = "en"
+> pipeline = ["normalize_domain_terms", "tagger", "parser", "ner"]
+>
+> [components.normalize_domain_terms]
+> factory = "normalize_domain_terms"
+> before = ["ner"]
+>
+> [components.resolve_domain_entities]
+> factory = "resolve_domain_entities"
+> after = ["ner", "parser"]
+> ```
+
+The nested form `dependencies = {after = ["ner"]}` is also supported. You can
+call [`nlp.sort_pipeline()`](/api/language#sort_pipeline) explicitly to validate
+the dependencies and apply the final order, for example after adding components
+with forward references. Use `nlp.pipe_dependencies` to inspect the resolved
+declarations. If a factory already defines its own arguments named `before` or
+`after`, those values keep being passed to the factory and the nested
+`dependencies` form can be used to declare ordering instead.
+
 ### Analyzing pipeline components {id="analysis",version="3"}
 
 The [`nlp.analyze_pipes`](/api/language#analyze_pipes) method analyzes the

@@ -7,7 +7,7 @@ import traceback
 import warnings
 from contextlib import ExitStack, contextmanager
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from itertools import chain, cycle
 from pathlib import Path
 from timeit import default_timer as timer
@@ -44,6 +44,12 @@ from .lang.punctuation import TOKENIZER_INFIXES, TOKENIZER_PREFIXES, TOKENIZER_S
 from .lang.tokenizer_exceptions import BASE_EXCEPTIONS, URL_MATCH
 from .lookups import load_lookups
 from .pipe_analysis import analyze_pipes, print_pipe_analysis, validate_attrs
+from .pipeline_dependencies import (
+    extract_pipe_dependencies,
+    normalize_dependencies,
+    normalize_pipe_dependencies,
+    sort_pipeline_components,
+)
 from .schemas import (
     ConfigSchema,
     ConfigSchemaInit,
@@ -198,6 +204,7 @@ class Language:
         # Component meta and configs are only needed on the instance
         self._pipe_meta: Dict[str, "FactoryMeta"] = {}  # meta by component
         self._pipe_configs: Dict[str, Config] = {}  # config by component
+        self._pipe_dependencies: Dict[str, Dict[str, Tuple[str, ...]]] = {}
 
         if not isinstance(vocab, Vocab) and vocab is not True:
             raise ValueError(Errors.E918.format(vocab=vocab, vocab_type=type(Vocab)))
@@ -296,6 +303,10 @@ class Language:
             pipe_meta = self.get_pipe_meta(pipe_name)
             pipe_config = self.get_pipe_config(pipe_name)
             pipeline[pipe_name] = {"factory": pipe_meta.factory, **pipe_config}
+            dependencies = self._pipe_dependencies.get(pipe_name, {})
+            for key in ("before", "after"):
+                if dependencies.get(key):
+                    pipeline[pipe_name][key] = list(dependencies[key])
             if pipe_meta.default_score_weights:
                 score_weights.append(pipe_meta.default_score_weights)
         self._config["nlp"]["pipeline"] = list(self.component_names)
@@ -386,6 +397,22 @@ class Language:
         return SimpleFrozenDict(factories)
 
     @property
+    def pipe_dependencies(self) -> Dict[str, Dict[str, List[str]]]:
+        """Get the ordering dependencies for the available pipeline components.
+
+        RETURNS (Dict[str, Dict[str, List[str]]]): Dependency names keyed by
+            component name and then by "before" or "after".
+        """
+        dependencies = {}
+        for name in self.component_names:
+            deps = self._pipe_dependencies.get(name, {})
+            dependencies[name] = {
+                "before": list(deps.get("before", ())),
+                "after": list(deps.get("after", ())),
+            }
+        return SimpleFrozenDict(dependencies)
+
+    @property
     def pipe_labels(self) -> Dict[str, List[str]]:
         """Get the labels set by the pipeline components, if available (if
         the component exposes a labels property and the labels are not
@@ -462,6 +489,15 @@ class Language:
         pipe_config = self._pipe_configs[name]
         return pipe_config
 
+    def _get_factory_arg_names(self, factory_name: str) -> Tuple[str, ...]:
+        internal_name = self.get_factory_name(factory_name)
+        if internal_name not in registry.factories:
+            internal_name = factory_name
+        if internal_name not in registry.factories:
+            return tuple()
+        factory_func = registry.factories.get(internal_name)
+        return tuple(util.get_arg_names(factory_func))
+
     @classmethod
     def factory(
         cls,
@@ -470,6 +506,8 @@ class Language:
         default_config: Dict[str, Any] = SimpleFrozenDict(),
         assigns: Iterable[str] = SimpleFrozenList(),
         requires: Iterable[str] = SimpleFrozenList(),
+        before: Iterable[str] = SimpleFrozenList(),
+        after: Iterable[str] = SimpleFrozenList(),
         retokenizes: bool = False,
         default_score_weights: Dict[str, Optional[float]] = SimpleFrozenDict(),
         func: Optional[Callable] = None,
@@ -486,6 +524,10 @@ class Language:
             e.g. "token.ent_id". Used for pipeline analysis.
         requires (Iterable[str]): Doc/Token attributes required by this component,
             e.g. "token.ent_id". Used for pipeline analysis.
+        before (Iterable[str]): Component instance or factory names that this
+            component must run before. Used for pipeline ordering.
+        after (Iterable[str]): Component instance or factory names that this
+            component must run after. Used for pipeline ordering.
         retokenizes (bool): Whether the component changes the tokenization.
             Used for pipeline analysis.
         default_score_weights (Dict[str, Optional[float]]): The scores to report during
@@ -534,6 +576,8 @@ class Language:
                 default_config=default_config,
                 assigns=validate_attrs(assigns),
                 requires=validate_attrs(requires),
+                before=normalize_dependencies(before),
+                after=normalize_dependencies(after),
                 scores=list(default_score_weights.keys()),
                 default_score_weights=default_score_weights,
                 retokenizes=retokenizes,
@@ -559,6 +603,8 @@ class Language:
         *,
         assigns: Iterable[str] = SimpleFrozenList(),
         requires: Iterable[str] = SimpleFrozenList(),
+        before: Iterable[str] = SimpleFrozenList(),
+        after: Iterable[str] = SimpleFrozenList(),
         retokenizes: bool = False,
         func: Optional[PipeCallable] = None,
     ) -> Callable[..., Any]:
@@ -573,6 +619,10 @@ class Language:
             e.g. "token.ent_id". Used for pipeline analysis.
         requires (Iterable[str]): Doc/Token attributes required by this component,
             e.g. "token.ent_id". Used for pipeline analysis.
+        before (Iterable[str]): Component instance or factory names that this
+            component must run before. Used for pipeline ordering.
+        after (Iterable[str]): Component instance or factory names that this
+            component must run after. Used for pipeline ordering.
         retokenizes (bool): Whether the component changes the tokenization.
             Used for pipeline analysis.
         func (Optional[Callable[[Doc], Doc]): Factory function if not used as a decorator.
@@ -612,6 +662,8 @@ class Language:
                 component_name,
                 assigns=assigns,
                 requires=requires,
+                before=before,
+                after=after,
                 retokenizes=retokenizes,
                 func=factory_func,
             )
@@ -758,7 +810,12 @@ class Language:
         # Make sure the source config is interpolated so we don't end up with
         # orphaned variables in our final config
         source_config = source.config.interpolate()
-        pipe_config = util.copy_config(source_config["components"][source_name])
+        pipe_config, _, _ = extract_pipe_dependencies(
+            util.copy_config(source_config["components"][source_name]),
+            factory_args=source._get_factory_arg_names(
+                source.get_pipe_meta(source_name).factory
+            ),
+        )
         self._pipe_configs[name] = pipe_config
         if self.vocab.strings != source.vocab.strings:
             for s in source.vocab.strings:
@@ -812,15 +869,30 @@ class Language:
         name = name if name is not None else factory_name
         if name in self.component_names:
             raise ValueError(Errors.E007.format(name=name, opts=self.component_names))
+        factory_args = (
+            tuple() if source is not None else self._get_factory_arg_names(factory_name)
+        )
+        config, dependency_config, stripped_config = extract_pipe_dependencies(
+            config, factory_args=factory_args
+        )
         # Overriding pipe name in the config is not supported and will be ignored.
         if "name" in config:
             warnings.warn(Warnings.W119.format(name_in_config=config.pop("name")))
+        if raw_config is not None:
+            raw_config = util.copy_config(raw_config)
+            for key in stripped_config:
+                raw_config.pop(key, None)
         if source is not None:
             # We're loading the component from a model. After loading the
             # component, we know its real factory name
+            source_pipe_name = factory_name
             pipe_component, factory_name = self.create_pipe_from_source(
                 factory_name, source, name=name
             )
+            if not dependency_config:
+                dependency_config = dict(
+                    source._pipe_dependencies.get(source_pipe_name, {})
+                )
         else:
             pipe_component = self.create_pipe(
                 factory_name,
@@ -830,8 +902,27 @@ class Language:
                 validate=validate,
             )
         pipe_index = self._get_pipe_index(before, after, first, last)
-        self._pipe_meta[name] = self.get_factory_meta(factory_name)
+        pipe_meta = self.get_factory_meta(factory_name)
+        self._pipe_meta[name] = pipe_meta
+        self._pipe_dependencies[name] = normalize_pipe_dependencies(
+            before=dependency_config.get("before", pipe_meta.before),
+            after=dependency_config.get("after", pipe_meta.after),
+        )
+        self._sync_pipe_meta_dependencies()
         self._components.insert(pipe_index, (name, pipe_component))
+        try:
+            self._sort_pipeline(validate=False)
+        except Exception:
+            # Keep add_pipe atomic if the new component introduces a cycle.
+            self._components = [
+                (pipe_name, component)
+                for pipe_name, component in self._components
+                if pipe_name != name
+            ]
+            self._pipe_meta.pop(name, None)
+            self._pipe_configs.pop(name, None)
+            self._pipe_dependencies.pop(name, None)
+            raise
         self._link_components()
         return pipe_component
 
@@ -889,6 +980,46 @@ class Language:
                 raise ValueError(err)
             return after + 1
         raise ValueError(Errors.E006.format(args=all_args, opts=self.component_names))
+
+    def sort_pipeline(self, *, validate: bool = True) -> None:
+        """Sort the pipeline according to component before/after dependencies.
+
+        The current order is used as a stable tie-breaker, so the pipeline is
+        only changed when a declared dependency requires it. Dependencies can
+        refer to component instance names or component factory names.
+
+        validate (bool): Whether to raise an error if a dependency refers to a
+            component or factory that isn't available.
+
+        DOCS: https://spacy.io/api/language#sort_pipeline
+        """
+        self._sort_pipeline(validate=validate)
+        self._link_components()
+
+    def _sort_pipeline(self, *, validate: bool) -> None:
+        names = [name for name, _ in self._components]
+        factories = {
+            name: self._pipe_meta[name].factory
+            for name in names
+            if name in self._pipe_meta
+        }
+        sorted_names = sort_pipeline_components(
+            names, factories, self._pipe_dependencies, validate=validate
+        )
+        if sorted_names == names:
+            return
+        components = dict(self._components)
+        self._components = [(name, components[name]) for name in sorted_names]
+
+    def _sync_pipe_meta_dependencies(self) -> None:
+        for name, dependencies in self._pipe_dependencies.items():
+            if name not in self._pipe_meta:
+                continue
+            meta = self._pipe_meta[name]
+            before = tuple(dependencies.get("before", ()))
+            after = tuple(dependencies.get("after", ()))
+            if tuple(meta.before) != before or tuple(meta.after) != after:
+                self._pipe_meta[name] = replace(meta, before=before, after=after)
 
     def has_pipe(self, name: str) -> bool:
         """Check if a component name is present in the pipeline. Equivalent to
@@ -964,6 +1095,16 @@ class Language:
         self._components[i] = (new_name, self._components[i][1])
         self._pipe_meta[new_name] = self._pipe_meta.pop(old_name)
         self._pipe_configs[new_name] = self._pipe_configs.pop(old_name)
+        self._pipe_dependencies[new_name] = self._pipe_dependencies.pop(
+            old_name, {"before": (), "after": ()}
+        )
+        for dependencies in self._pipe_dependencies.values():
+            for key in ("before", "after"):
+                dependencies[key] = tuple(
+                    new_name if value == old_name else value
+                    for value in dependencies.get(key, ())
+                )
+        self._sync_pipe_meta_dependencies()
         # Make sure [initialize] config is adjusted
         if old_name in self._config["initialize"]["components"]:
             init_cfg = self._config["initialize"]["components"].pop(old_name)
@@ -985,6 +1126,13 @@ class Language:
         # because factory may be used for something else
         self._pipe_meta.pop(name)
         self._pipe_configs.pop(name)
+        self._pipe_dependencies.pop(name, None)
+        for dependencies in self._pipe_dependencies.values():
+            for key in ("before", "after"):
+                dependencies[key] = tuple(
+                    value for value in dependencies.get(key, ()) if value != name
+                )
+        self._sync_pipe_meta_dependencies()
         self.meta.get("_sourced_vectors_hashes", {}).pop(name, None)
         # Make sure name is removed from the [initialize] config
         if name in self._config["initialize"]["components"]:
@@ -1933,7 +2081,10 @@ class Language:
                     with warnings.catch_warnings():
                         warnings.filterwarnings("ignore", message="\\[W113\\]")
                         nlp.add_pipe(
-                            source_name, source=source_nlps[model], name=pipe_name
+                            source_name,
+                            source=source_nlps[model],
+                            name=pipe_name,
+                            config=pipe_cfg,
                         )
                         # At this point after nlp.add_pipe, the listener map
                         # corresponds to the new pipeline.
@@ -1951,6 +2102,30 @@ class Language:
                     # Delete from cache if listeners were replaced
                     if listeners_replaced:
                         del source_nlps[model]
+        # Dependencies may refer to components that appear later in the config,
+        # so validate and apply the final ordering once all components exist.
+        exclude_names = {exclude} if isinstance(exclude, str) else set(exclude)
+        if exclude_names:
+            excluded_factories = {
+                pipeline[name].get("factory")
+                for name in exclude_names
+                if name in pipeline and "factory" in pipeline[name]
+            }
+            loaded_factories = {
+                nlp.get_pipe_meta(name).factory for name in nlp.component_names
+            }
+            for dependencies in nlp._pipe_dependencies.values():
+                for key in ("before", "after"):
+                    dependencies[key] = tuple(
+                        ref
+                        for ref in dependencies.get(key, ())
+                        if ref not in exclude_names
+                        and not (
+                            ref in excluded_factories and ref not in loaded_factories
+                        )
+                    )
+        nlp._sort_pipeline(validate=True)
+        nlp._link_components()
         # Restore the original vocab after sourcing if necessary
         if vocab_b is not None:
             nlp.vocab.from_bytes(vocab_b)
@@ -2336,6 +2511,8 @@ class FactoryMeta:
     retokenizes: bool = False
     scores: Iterable[str] = tuple()
     default_score_weights: Optional[Dict[str, Optional[float]]] = None  # noqa: E704
+    before: Iterable[str] = tuple()
+    after: Iterable[str] = tuple()
 
 
 class DisabledPipes(list):

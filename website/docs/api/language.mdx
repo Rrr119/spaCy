@@ -109,6 +109,8 @@ decorator. For more details and examples, see the
 | _keyword-only_ |                                                                                                                                                                    |
 | `assigns`      | `Doc` or `Token` attributes assigned by this component, e.g. `["token.ent_id"]`. Used for [pipe analysis](/usage/processing-pipelines#analysis). ~~Iterable[str]~~ |
 | `requires`     | `Doc` or `Token` attributes required by this component, e.g. `["token.ent_id"]`. Used for [pipe analysis](/usage/processing-pipelines#analysis). ~~Iterable[str]~~ |
+| `before`       | Component instance or factory names that this component must run before. Used for [pipeline ordering](/usage/processing-pipelines#dependencies). ~~Iterable[str]~~ |
+| `after`        | Component instance or factory names that this component must run after. Used for [pipeline ordering](/usage/processing-pipelines#dependencies). ~~Iterable[str]~~  |
 | `retokenizes`  | Whether the component changes tokenization. Used for [pipe analysis](/usage/processing-pipelines#analysis). ~~bool~~                                               |
 | `func`         | Optional function if not used as a decorator. ~~Optional[Callable[[Doc], Doc]]~~                                                                                   |
 
@@ -155,6 +157,8 @@ examples, see the
 | `default_config`        | The default config, describing the default values of the factory arguments. ~~Dict[str, Any]~~                                                                                                                                                                                                                                     |
 | `assigns`               | `Doc` or `Token` attributes assigned by this component, e.g. `["token.ent_id"]`. Used for [pipe analysis](/usage/processing-pipelines#analysis). ~~Iterable[str]~~                                                                                                                                                                 |
 | `requires`              | `Doc` or `Token` attributes required by this component, e.g. `["token.ent_id"]`. Used for [pipe analysis](/usage/processing-pipelines#analysis). ~~Iterable[str]~~                                                                                                                                                                 |
+| `before`                | Component instance or factory names that this component must run before. Used for [pipeline ordering](/usage/processing-pipelines#dependencies). ~~Iterable[str]~~                                                                                                                                                                  |
+| `after`                 | Component instance or factory names that this component must run after. Used for [pipeline ordering](/usage/processing-pipelines#dependencies). ~~Iterable[str]~~                                                                                                                                                                   |
 | `retokenizes`           | Whether the component changes tokenization. Used for [pipe analysis](/usage/processing-pipelines#analysis). ~~bool~~                                                                                                                                                                                                               |
 | `default_score_weights` | The scores to report during training, and their default weight towards the final score used to select the best model. Weights should sum to `1.0` per component and will be combined and normalized for the whole pipeline. If a weight is set to `None`, the score will not be logged or weighted. ~~Dict[str, Optional[float]]~~ |
 | `func`                  | Optional function if not used as a decorator. ~~Optional[Callable[[...], Callable[[Doc], Doc]]]~~                                                                                                                                                                                                                                  |
@@ -458,6 +462,37 @@ component, adds it to the pipeline and returns it.
 | `source` <Tag variant="new">3</Tag>   | Optional source pipeline to copy component from. If a source is provided, the `factory_name` is interpreted as the name of the component in the source pipeline. Make sure that the vocab, vectors and settings of the source pipeline match the target pipeline. ~~Optional[Language]~~ |
 | `validate` <Tag variant="new">3</Tag> | Whether to validate the component config and arguments against the types expected by the factory. Defaults to `True`. ~~bool~~                                                                                                                                                           |
 | **RETURNS**                           | The pipeline component. ~~Callable[[Doc], Doc]~~                                                                                                                                                                                                                                         |
+
+The component `config` can also include `before` and `after` to declare
+[pipeline dependencies](/usage/processing-pipelines#dependencies). These values
+are stored in the component block when the config is serialized and are not
+passed to the component factory.
+
+## Language.sort_pipeline {id="sort_pipeline",tag="method"}
+
+Sort the current pipeline based on the `before` and `after` dependencies
+declared by its components. The current order is used as a stable tie-breaker,
+so components without constraints keep their relative order. Dependencies can
+refer to component instance names or factory names.
+
+> #### Example
+>
+> ```python
+> @Language.component("normalize_domain_terms", before=["ner"])
+> def normalize_domain_terms(doc):
+>     return doc
+>
+> nlp = spacy.blank("en")
+> nlp.add_pipe("ner")
+> nlp.add_pipe("normalize_domain_terms")
+> assert nlp.pipe_names == ["normalize_domain_terms", "ner"]
+> nlp.sort_pipeline()
+> ```
+
+| Name           | Description                                                                                                                                  |
+| -------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| _keyword-only_ |                                                                                                                                              |
+| `validate`     | Whether to raise an error if a dependency refers to a missing component or factory. Defaults to `True`. ~~bool~~                              |
 
 ## Language.create_pipe {id="create_pipe",tag="method",version="2"}
 
@@ -1158,6 +1193,8 @@ instance and factory instance.
 | `default_config`        | The default config, describing the default values of the factory arguments. ~~Dict[str, Any]~~                                                                                                                                                                                                                                     |
 | `assigns`               | `Doc` or `Token` attributes assigned by this component, e.g. `["token.ent_id"]`. Used for [pipe analysis](/usage/processing-pipelines#analysis). ~~Iterable[str]~~                                                                                                                                                                 |
 | `requires`              | `Doc` or `Token` attributes required by this component, e.g. `["token.ent_id"]`. Used for [pipe analysis](/usage/processing-pipelines#analysis). ~~Iterable[str]~~                                                                                                                                                                 |
+| `before`                | Component instance or factory names that this component must run before. ~~Iterable[str]~~                                                                                                                                                                                                                                         |
+| `after`                 | Component instance or factory names that this component must run after. ~~Iterable[str]~~                                                                                                                                                                                                                                          |
 | `retokenizes`           | Whether the component changes tokenization. Used for [pipe analysis](/usage/processing-pipelines#analysis). ~~bool~~                                                                                                                                                                                                               |
 | `default_score_weights` | The scores to report during training, and their default weight towards the final score used to select the best model. Weights should sum to `1.0` per component and will be combined and normalized for the whole pipeline. If a weight is set to `None`, the score will not be logged or weighted. ~~Dict[str, Optional[float]]~~ |
 | `scores`                | All scores set by the components if it's trainable, e.g. `["ents_f", "ents_r", "ents_p"]`. Based on the `default_score_weights` and used for [pipe analysis](/usage/processing-pipelines#analysis). ~~Iterable[str]~~                                                                                                              |
